@@ -1,0 +1,166 @@
+#!/bin/bash
+#
+# Updates the ticket reference in the commit message.
+#
+# This git hook parses ticket reference from the current git revision
+# and if found, it updates the ticket reference in the commit message.
+# The script is configurable via `git config ` options.
+# For full information see the README.md
+
+set -e
+set -o pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NO_COLOR='\033[0m'
+
+function log_debug() {
+    echo -n "" # "DEBUG: ${@}\n"
+}
+
+function log_info() {
+    echo "INFO: ${@}"
+}
+
+function log_warn() {
+    echo -e "${RED}WARN: ${@}${NO_COLOR}"
+}
+
+function log_error() {
+    echo -e "${RED}====================\nERROR: ${@}\n====================${NO_COLOR}"
+}
+
+CFG_PREFIX="ticket-reference"
+CFG_TICKET_REV_REGEX="${CFG_PREFIX}.rev-regex"
+CFG_TICKET_MSG_REGEX="${CFG_PREFIX}.msg-regex"
+CFG_INSERT_STRATEGY="${CFG_PREFIX}.insert-strategy"
+CFG_TICKET_TEMPLATE_PREPEND="${CFG_PREFIX}.template-prepend"
+CFG_TICKET_TEMPLATE_APPEND="${CFG_PREFIX}.template-append"
+
+DEFAULT_TEMPLATE_PREPEND="\$ticket: "
+DEFAULT_TEMPLATE_APPEND="\n\nRelated: [\$ticket]"
+
+INSERT_STRATEGY_PREPEND="PREPEND"
+INSERT_STRATEGY_APPEND="APPEND"
+DEFAULT_INSERT_STRATEGY="$INSERT_STRATEGY_PREPEND"
+
+
+# Returns git config value for the given key, or default value.
+# Param 1: The key from git config to be obtained.
+# Param 2: The default value, if there is none in git config.
+function git_config() {
+    local key="$1"
+    local def_value="$2"
+    local value
+
+    value=$(git config "$key")
+    [ -z "$value" ] && value="$def_value"
+
+    echo "$value"
+}
+
+# Parses ticket reference from current git revision.
+# Returns the parsed ticket reference, if found; empty string, otherwise.
+function parse_rev_ticket() {
+    local rev
+    rev=$(git rev-parse --abbrev-ref HEAD)
+
+    local ticket_re
+    ticket_re=$(git_config "$CFG_TICKET_REV_REGEX")
+
+    [[ $rev =~ $ticket_re ]]  && echo "${BASH_REMATCH[1]}" || echo ""
+}
+
+# Parses ticket reference from commit message.
+# Param 1: The commit message file.
+# Returns the parsed ticket reference, if found; empty string, otherwise.
+function parse_msg_ticket() {
+    local commit_msg_file="$1"
+    local msg
+    msg=$(cat "$commit_msg_file")
+
+    local ticket_re
+    ticket_re=$(git_config "$CFG_TICKET_MSG_REGEX")
+
+    [[ $msg =~ $ticket_re ]]  && echo "${BASH_REMATCH[1]}" || echo ""
+}
+
+# Renders the template (expands all placeholders)
+# Param 1: The template string.
+# Param 2: The ticket reference.
+# Returns the rendered template.
+function render_template() {
+    local template="$1"
+    local ticket="$2"
+
+    echo "$template" | sed -e "s/\$ticket/$ticket/"
+}
+
+# Updates the ticket reference in the commit message.
+# Param 1: the git revision ticket reference (the valid one).
+# Param 2: The commit message file.
+# Param 3: The commit message ticket reference (to be overridden).
+function update_reference_in_msg() {
+    local rev_ticket="$1"
+    local commit_msg_file="$2"
+    local msg_ticket="$3"
+
+    [ ! -z "$msg_ticket" ] && {
+        log_warn "ticket reference in git revision and commit message differs"
+        log_info "replacing '$msg_ticket' with '$rev_ticket' in commit message"
+        sed -i -e "s/$msg_ticket/$rev_ticket/" "$commit_msg_file"
+        return 0
+    }
+
+    # prepend / append when commit does not contain any reference
+    local strategy
+    strategy=$(git_config "$CFG_INSERT_STRATEGY" "$DEFAULT_INSERT_STRATEGY")
+
+    case "$strategy" in
+        "$INSERT_STRATEGY_PREPEND")
+            log_info "prepending ticket reference to the commit message"
+            local template
+            template=$(git_config "$CFG_TICKET_TEMPLATE_PREPEND" "$DEFAULT_TEMPLATE_PREPEND")
+            template=$(render_template "$template" "$rev_ticket")
+            sed -i -e "1s/^/${template}/" "$commit_msg_file"
+            ;;
+        "$INSERT_STRATEGY_APPEND")
+            log_info "appending ticket reference to the commit message"
+            local template
+            template=$(git_config "$CFG_TICKET_TEMPLATE_APPEND" "$DEFAULT_TEMPLATE_APPEND")
+            template=$(render_template "$template" "$rev_ticket")
+            echo -e "$template" >> "$commit_msg_file"
+            ;;
+        *)
+            log_error "unsupported insert strategy '$strategy'"
+            return 1 # aborts the commit
+    esac
+}
+
+# Main function of the git hook.
+# Param 1: The commit message file.
+function main() {
+    local commit_msg_file="$1"
+
+    local rev_ticket
+    rev_ticket=$(parse_rev_ticket)
+    [ -z "$rev_ticket" ] && {
+        log_warn "git revision does not contain any ticket reference"
+        log_info "leaving the commit message as-is"
+        return 0
+    }
+
+    local msg_ticket
+    msg_ticket=$(parse_msg_ticket "$commit_msg_file")
+    [ "$rev_ticket" == "$msg_ticket" ] && {
+        return 0
+    }
+
+    log_debug "git revision ticket reference: '$rev_ticket'"
+    log_debug "commit message  ticket reference: '$msg_ticket'"
+
+    update_reference_in_msg "$rev_ticket" "$commit_msg_file" "$msg_ticket"
+}
+
+main $@

@@ -1,0 +1,81 @@
+#!/bin/bash
+
+set -e
+set -o pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NO_COLOR='\033[0m'
+
+function log_debug() {
+    echo -n "" # "DEBUG: ${@}\n"
+}
+
+function log_info() {
+    echo "INFO: ${@}"
+}
+
+function log_warn() {
+    echo -e "${RED}WARN: ${@}${NO_COLOR}"
+}
+
+function log_error() {
+    echo -e "${RED}====================\nERROR: ${@}\n====================${NO_COLOR}"
+}
+
+CFG_PREFIX="ticket-reference"
+CFG_TICKET_REV_REGEX="${CFG_PREFIX}.rev-regex"
+
+# Returns git config value for the given key, or default value.
+# Param 1: The key from git config to be obtained.
+# Param 2: The default value, if there is none in git config.
+function git_config() {
+    local key="$1"
+    local def_value="$2"
+    local value
+
+    value=$(git config "$key")
+    [ -z "$value" ] && value="$def_value"
+
+    echo "$value"
+}
+
+# Parses ticket reference from current git revision.
+# Returns the parsed ticket reference, if found; empty string, otherwise.
+function parse_rev_ticket() {
+    local rev
+    rev=$(git rev-parse --abbrev-ref HEAD)
+
+    local ticket_re
+    ticket_re=$(git_config "$CFG_TICKET_REV_REGEX")
+
+    [[ $rev =~ $ticket_re ]]  && echo "${BASH_REMATCH[1]}" || echo ""
+}
+
+function check_for_references() {
+    local rev_ticket
+    rev_ticket=$(parse_rev_ticket)
+    [ -z "$rev_ticket" ] && {
+        return 0
+    }
+
+    git grep "$rev_ticket" 2>&1 >/dev/null && {
+        log_warn "Ticket reference '$rev_ticket' was found in files. Did you forget to resolve some TODOs?"
+        log_info "To find all the references use \"git grep '$rev_ticket'\""
+    }
+}
+
+function check_for_todos() {
+    git diff --cached HEAD^ | grep -i TODO 2>&1 1>/dev/null && {
+        log_warn "The commit contains TODOs. Check them with 'git diff --cached HEAD^ | grep -i TODO'"
+    }
+
+}
+
+function main() {
+    check_for_references
+    check_for_todos
+}
+
+main $@
